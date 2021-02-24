@@ -433,15 +433,23 @@ func generateVolumeMounts(volume acidv1.Volume) []v1.VolumeMount {
 	}
 }
 
+// add support for readOnly
 func generateContainer(
 	name string,
 	dockerImage *string,
 	resourceRequirements *v1.ResourceRequirements,
 	envVars []v1.EnvVar,
 	volumeMounts []v1.VolumeMount,
+	readOnlyRootFilesystem *bool,
 	privilegedMode bool,
 	additionalPodCapabilities v1.Capabilities,
 ) *v1.Container {
+	// var readOnly *bool
+	// if readOnlyRootFilesystem {
+	// 	readOnly = util.True()
+	// } else {
+	// 	readOnly = util.False()
+	// }
 	return &v1.Container{
 		Name:            name,
 		Image:           *dockerImage,
@@ -466,7 +474,7 @@ func generateContainer(
 		SecurityContext: &v1.SecurityContext{
 			AllowPrivilegeEscalation: &privilegedMode,
 			Privileged:               &privilegedMode,
-			ReadOnlyRootFilesystem:   util.False(),
+			ReadOnlyRootFilesystem:   readOnlyRootFilesystem,
 			Capabilities:             &additionalPodCapabilities,
 		},
 	}
@@ -567,6 +575,8 @@ func (c *Cluster) generatePodTemplate(
 	initContainers []v1.Container,
 	sidecarContainers []v1.Container,
 	tolerationsSpec *[]v1.Toleration,
+	hostNetwork bool,
+	ports v1.ContainerPort,
 	spiloRunAsUser *int64,
 	spiloRunAsGroup *int64,
 	spiloFSGroup *int64,
@@ -587,6 +597,16 @@ func (c *Cluster) generatePodTemplate(
 	terminateGracePeriodSeconds := terminateGracePeriod
 	containers := []v1.Container{*spiloContainer}
 	containers = append(containers, sidecarContainers...)
+	for _, c := range containers {
+		c.Ports = append(c.Ports, ports)
+	}
+	// if ports != nil {
+	// 	for _, c := range containers {
+	// 		for _, p := range ports {
+	// 			c.Ports = append(c.Ports, p)
+	// 		}
+	// 	}
+	// }
 	securityContext := v1.PodSecurityContext{}
 
 	if spiloRunAsUser != nil {
@@ -606,6 +626,7 @@ func (c *Cluster) generatePodTemplate(
 		TerminationGracePeriodSeconds: &terminateGracePeriodSeconds,
 		Containers:                    containers,
 		InitContainers:                initContainers,
+		HostNetwork:                   hostNetwork,
 		Tolerations:                   *tolerationsSpec,
 		SecurityContext:               &securityContext,
 	}
@@ -928,7 +949,6 @@ func extractPgVersionFromBinPath(binPath string, template string) (string, error
 }
 
 func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.StatefulSet, error) {
-
 	var (
 		err                 error
 		initContainers      []v1.Container
@@ -938,11 +958,19 @@ func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.Statef
 		additionalVolumes   = spec.AdditionalVolumes
 	)
 
+	c.logger.Errorf("running generateStatefulSet() hostPorts[0] '%v' hostPort '%d' name '%s' containerPort '%d' readOnly '%v' hostNetwork '%v'", c.OpConfig.HostPorts, c.OpConfig.HostPorts.HostPort, c.OpConfig.HostPorts.Name, c.OpConfig.HostPorts.ContainerPort, *c.OpConfig.ReadOnlyRootFilesystem, c.OpConfig.HostNetwork)
+	// c.logger.Errorf("running generateStatefulSet() hostPorts[0] '%v' hostPort '%d' name '%s' containerPort '%d' readOnly '%v' hostNetwork '%v'", c.OpConfig.HostPorts[0], c.OpConfig.HostPorts[0].HostPort, c.OpConfig.HostPorts[0].Name, c.OpConfig.HostPorts[0].ContainerPort, *c.OpConfig.ReadOnlyRootFilesystem, c.OpConfig.HostNetwork)
+	// for _, ports := range c.OpConfig.HostPorts {
+	// 	c.logger.Errorf("%v", ports)
+	// 	c.logger.Errorf("Name %s", ports.Name)
+	// 	c.logger.Errorf("HostPort %d", ports.HostPort)
+	// 	c.logger.Errorf("ContainerPort %d", ports.ContainerPort)
+	// }
+
 	// Improve me. Please.
 	if c.OpConfig.SetMemoryRequestToLimit {
 
 		// controller adjusts the default memory request at operator startup
-
 		request := spec.Resources.ResourceRequests.Memory
 		if request == "" {
 			request = c.OpConfig.Resources.DefaultMemoryRequest
@@ -960,7 +988,6 @@ func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.Statef
 		if isSmaller {
 			c.logger.Warningf("The memory request of %v for the Postgres container is increased to match the memory limit of %v.", request, limit)
 			spec.Resources.ResourceRequests.Memory = limit
-
 		}
 
 		// controller adjusts the Scalyr sidecar request at operator startup
@@ -989,7 +1016,6 @@ func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.Statef
 				sidecar.Resources.ResourceRequests.Memory = sidecar.Resources.ResourceLimits.Memory
 			}
 		}
-
 	}
 
 	defaultResources := c.makeDefaultResources()
@@ -1159,6 +1185,7 @@ func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.Statef
 		resourceRequirements,
 		deduplicateEnvVars(spiloEnvVars, c.containerName(), c.logger),
 		volumeMounts,
+		c.OpConfig.Resources.ReadOnlyRootFilesystem,
 		c.OpConfig.Resources.SpiloPrivileged,
 		generateCapabilities(c.OpConfig.AdditionalPodCapabilities),
 	)
@@ -1234,6 +1261,8 @@ func (c *Cluster) generateStatefulSet(spec *acidv1.PostgresSpec) (*appsv1.Statef
 		initContainers,
 		sidecarContainers,
 		&tolerationSpec,
+		c.OpConfig.HostNetwork,
+		c.OpConfig.HostPorts,
 		effectiveRunAsUser,
 		effectiveRunAsGroup,
 		effectiveFSGroup,
@@ -1913,6 +1942,7 @@ func (c *Cluster) generateLogicalBackupJob() (*batchv1beta1.CronJob, error) {
 		resourceRequirements,
 		envVars,
 		[]v1.VolumeMount{},
+		c.OpConfig.ReadOnlyRootFilesystem,
 		c.OpConfig.SpiloPrivileged, // use same value as for normal DB pods
 		v1.Capabilities{},
 	)
@@ -1947,6 +1977,8 @@ func (c *Cluster) generateLogicalBackupJob() (*batchv1beta1.CronJob, error) {
 		[]v1.Container{},
 		[]v1.Container{},
 		&[]v1.Toleration{},
+		false,
+		v1.ContainerPort{},
 		nil,
 		nil,
 		nil,
